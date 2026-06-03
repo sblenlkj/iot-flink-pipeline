@@ -1,0 +1,32 @@
+[project]
+name = "iot-flink-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "blenlkj", email = "sblenlkj@gmail.com" }
+]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "apache-flink==2.0.0",
+    "confluent-kafka>=2.6.0",
+    "psycopg[binary]>=3.3.4",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+run-generator = "iot_flink_pipeline.entrypoints.run_generator:main"
+run-result-consumer = "iot_flink_pipeline.entrypoints.run_result_consumer:main"
+
+run-flink-datastream-window-job = "iot_flink_pipeline.entrypoints.run_flink_datastream_window_job:main"
+run-flink-table-upsert-job = "iot_flink_pipeline.entrypoints.run_flink_table_upsert_job:main"
+run-flink-bridge-table-sink-job = "iot_flink_pipeline.entrypoints.run_flink_bridge_table_sink_job:main"
+run-flink-pure-datastream-job = "iot_flink_pipeline.entrypoints.run_flink_pure_datastream_job:main"
+
+[build-system]
+requires = ["uv_build>=0.9.22,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.extra-build-dependencies]
+apache-beam = ["setuptools<82"]
