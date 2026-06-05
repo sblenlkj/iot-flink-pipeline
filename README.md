@@ -1,4 +1,4 @@
-# IoT Flink Pipeline
+# IoT Flink Pipeline. Сделал Дмитрий Каневский
 
 Учебный проект по Apache Flink: Python-генератор создаёт IoT-события, Kafka хранит входной поток, Postgres хранит справочник производителей датчиков, а Flink считает оконные агрегаты по `event_time` и пишет результаты обратно в Kafka.
 
