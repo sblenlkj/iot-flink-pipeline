@@ -12,6 +12,7 @@ from iot_flink_pipeline.flink.datastream_windows import (
     get_window_end_ms,
     get_window_start_ms,
     window_bound_to_string,
+    median,
 )
 
 
@@ -36,8 +37,8 @@ class WindowResultRowFunction(ProcessWindowFunction):
             sum(row[4] for row in rows) / events_count,
             2,
         )
-        avg_humidity = round(
-            sum(row[5] for row in rows) / events_count,
+        median_humidity = round(
+            median([row[5] for row in rows]),
             2,
         )
 
@@ -49,7 +50,7 @@ class WindowResultRowFunction(ProcessWindowFunction):
             country=first[2],
             events_count=events_count,
             avg_temperature=avg_temperature,
-            avg_humidity=avg_humidity,
+            median_humidity=median_humidity,
         )
 
 
@@ -78,7 +79,7 @@ def create_window_result_row_stream_from_enriched_stream(
                     "country",
                     "events_count",
                     "avg_temperature",
-                    "avg_humidity",
+                    "median_humidity",
                 ],
                 [
                     Types.STRING(),
@@ -124,6 +125,6 @@ def create_window_result_table(
         .column("country", DataTypes.STRING())
         .column("events_count", DataTypes.BIGINT())
         .column("avg_temperature", DataTypes.DOUBLE())
-        .column("avg_humidity", DataTypes.DOUBLE())
+        .column("median_humidity", DataTypes.DOUBLE())
         .build(),
     )

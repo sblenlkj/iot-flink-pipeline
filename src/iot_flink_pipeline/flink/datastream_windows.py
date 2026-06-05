@@ -12,6 +12,16 @@ from pyflink.datastream.functions import ProcessWindowFunction
 from pyflink.datastream.window import TumblingEventTimeWindows
 from pyflink.table import StreamTableEnvironment, Table
 
+def median(values: list[float]) -> float:
+    """Calculate exact median for a non-empty list of float values."""
+    sorted_values = sorted(values)
+    n = len(sorted_values)
+    mid = n // 2
+
+    if n % 2 == 1:
+        return sorted_values[mid]
+
+    return (sorted_values[mid - 1] + sorted_values[mid]) / 2
 
 def parse_event_time_to_epoch_millis(value: str) -> int:
     """Convert ISO event_time string to UTC epoch milliseconds."""
@@ -87,8 +97,8 @@ class WindowResultJsonFunction(ProcessWindowFunction):
             sum(row[4] for row in rows) / events_count,
             2,
         )
-        avg_humidity = round(
-            sum(row[5] for row in rows) / events_count,
+        median_humidity = round(
+            median([row[5] for row in rows]),
             2,
         )
 
@@ -104,7 +114,7 @@ class WindowResultJsonFunction(ProcessWindowFunction):
             "country": first[2],
             "events_count": events_count,
             "avg_temperature": avg_temperature,
-            "avg_humidity": avg_humidity,
+            "median_humidity": median_humidity,
         }
 
         yield json.dumps(

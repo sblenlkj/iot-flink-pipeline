@@ -56,7 +56,7 @@ def create_upsert_aggregates_sink_sql() -> str:
         country STRING,
         events_count BIGINT,
         avg_temperature DOUBLE,
-        avg_humidity DOUBLE,
+        median_humidity DOUBLE,
         PRIMARY KEY (window_start, window_end, manufacturer_id) NOT ENFORCED
     ) WITH (
         'connector' = 'upsert-kafka',
@@ -79,7 +79,7 @@ def create_append_aggregates_sink_sql() -> str:
         country STRING,
         events_count BIGINT,
         avg_temperature DOUBLE,
-        avg_humidity DOUBLE
+        median_humidity DOUBLE
     ) WITH (
         'connector' = 'kafka',
         'topic' = '{settings.iot_window_results_table_sink_topic}',

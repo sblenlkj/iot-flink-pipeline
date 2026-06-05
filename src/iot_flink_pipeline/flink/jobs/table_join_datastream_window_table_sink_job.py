@@ -33,7 +33,7 @@ def insert_window_results_into_table_sink(t_env: StreamTableEnvironment) -> None
             country,
             events_count,
             avg_temperature,
-            avg_humidity
+            median_humidity
         FROM window_results
         """
     )

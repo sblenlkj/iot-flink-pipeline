@@ -27,7 +27,7 @@ def run_table_window_upsert(t_env: StreamTableEnvironment) -> None:
             m.country,
             COUNT(*) AS events_count,
             ROUND(AVG(e.temperature), 2) AS avg_temperature,
-            ROUND(AVG(e.humidity), 2) AS avg_humidity
+            ROUND(PERCENTILE(e.humidity, 0.5), 2) AS median_humidity
         FROM TABLE(
             TUMBLE(
                 TABLE iot_events,
