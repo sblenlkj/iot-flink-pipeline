@@ -19,3 +19,6 @@ jars/*.jar
 .idea/
 .vscode/
 .DS_Store
+
+tree.txt
+docs*

@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--events-per-batch",
         type=int,
-        default=10,
+        default=5,
         help="Number of events generated before each random delay",
     )
     return parser.parse_args()

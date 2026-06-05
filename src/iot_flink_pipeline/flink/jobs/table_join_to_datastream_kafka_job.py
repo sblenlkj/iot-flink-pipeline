@@ -13,10 +13,13 @@ from iot_flink_pipeline.flink.joins import (
     create_sources_and_enriched_view,
 )
 
+from iot_flink_pipeline.settings import settings
+
 logger = logging.getLogger(__name__)
 
 
 def run() -> None:
+    """Run main job: Table sources/join -> DataStream event-time window -> Kafka."""
     logger.info(
         "Starting job: Table sources/join -> DataStream event-time window -> Kafka sink"
     )
@@ -32,6 +35,10 @@ def run() -> None:
         enriched_table=enriched_table,
     )
 
-    sink_json_stream_to_kafka(result_stream)
+    sink_json_stream_to_kafka(
+        result_stream,
+        topic=settings.iot_window_results_topic,
+        sink_name="table-join-datastream-window-kafka-sink",
+    )
 
     env.execute("table-join-to-datastream-event-time-window-kafka-job")

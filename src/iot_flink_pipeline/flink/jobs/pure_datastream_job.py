@@ -265,6 +265,10 @@ def run() -> None:
         enriched_stream
     )
 
-    sink_json_stream_to_kafka(result_stream)
+    sink_json_stream_to_kafka(
+        result_stream,
+        topic=settings.iot_window_results_datastream_topic,
+        sink_name="pure-datastream-window-kafka-sink",
+    )
 
     env.execute("pure-datastream-event-time-window-kafka-job")

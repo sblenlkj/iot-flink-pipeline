@@ -1,8 +1,12 @@
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from iot_flink_pipeline.domain.events import IoTEvent
 from iot_flink_pipeline.domain.sensors import SensorSpec
+
+
+EVENT_TIME_JITTER_STD_SEC = 3.0
+EVENT_TIME_JITTER_LIMIT_SEC = 4.0
 
 
 class IoTEventFactory:
@@ -15,10 +19,20 @@ class IoTEventFactory:
         return IoTEvent(
             sensor_id=sensor.sensor_id,
             manufacturer_id=sensor.manufacturer_id,
-            event_time=datetime.now(timezone.utc),
+            event_time=self._generate_event_time(),
             temperature=self._generate_temperature(),
             humidity=self._generate_humidity(),
         )
+
+    @staticmethod
+    def _generate_event_time() -> datetime:
+        jitter_sec = random.normalvariate(0.0, EVENT_TIME_JITTER_STD_SEC)
+        bounded_jitter_sec = max(
+            -EVENT_TIME_JITTER_LIMIT_SEC,
+            min(EVENT_TIME_JITTER_LIMIT_SEC, jitter_sec),
+        )
+
+        return datetime.now(timezone.utc) + timedelta(seconds=bounded_jitter_sec)
 
     @staticmethod
     def _generate_temperature() -> float:

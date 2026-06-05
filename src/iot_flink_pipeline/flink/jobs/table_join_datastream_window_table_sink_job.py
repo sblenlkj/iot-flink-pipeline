@@ -3,7 +3,7 @@ import logging
 from pyflink.table import StreamTableEnvironment
 
 from iot_flink_pipeline.flink.common import create_table_environment
-from iot_flink_pipeline.flink.datastream_windows import (
+from iot_flink_pipeline.flink.datastream_window_table_bridge import (
     create_window_result_row_stream_from_table,
     create_window_result_table,
 )
@@ -16,10 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 def create_append_sink(t_env: StreamTableEnvironment) -> None:
+    """Register regular Kafka Table API sink for final window results."""
     t_env.execute_sql(create_append_aggregates_sink_sql())
 
 
 def insert_window_results_into_table_sink(t_env: StreamTableEnvironment) -> None:
+    """Insert final append-only window results into Kafka Table sink."""
     result = t_env.execute_sql(
         """
         INSERT INTO iot_window_results_table_sink
@@ -40,8 +42,9 @@ def insert_window_results_into_table_sink(t_env: StreamTableEnvironment) -> None
 
 
 def run() -> None:
+    """Run bridge job: Table join -> DataStream window -> Table Kafka sink."""
     logger.info(
-        "Starting job: Table sources/join -> DataStream event-time window -> Table sink"
+        "Starting job: Table sources/join -> DataStream event-time window -> Table Kafka sink"
     )
 
     t_env = create_table_environment()
