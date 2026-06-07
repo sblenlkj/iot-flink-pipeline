@@ -13,7 +13,7 @@ def create_iot_events_source_sql() -> str:
         event_ts AS TO_TIMESTAMP(
             REPLACE(SUBSTRING(event_time, 1, 23), 'T', ' ')
         ),
-        WATERMARK FOR event_ts AS event_ts - INTERVAL '5' SECOND
+        WATERMARK FOR event_ts AS event_ts - INTERVAL {settings.watermark_delay} SECOND
     ) WITH (
         'connector' = 'kafka',
         'topic' = '{settings.iot_events_topic}',

@@ -12,6 +12,8 @@ from pyflink.datastream.functions import ProcessWindowFunction
 from pyflink.datastream.window import TumblingEventTimeWindows
 from pyflink.table import StreamTableEnvironment, Table
 
+from iot_flink_pipeline.settings import settings
+
 def median(values: list[float]) -> float:
     """Calculate exact median for a non-empty list of float values."""
     sorted_values = sorted(values)
@@ -152,7 +154,7 @@ def assign_event_time_watermarks(simple_stream: DataStream) -> DataStream:
     """Assign event-time timestamps and bounded-out-of-orderness watermarks."""
     watermark_strategy = (
         WatermarkStrategy
-        .for_bounded_out_of_orderness(Duration.of_seconds(5))
+        .for_bounded_out_of_orderness(Duration.of_seconds(settings.watermark_delay))
         .with_timestamp_assigner(TupleEventTimeAssigner())
     )
 

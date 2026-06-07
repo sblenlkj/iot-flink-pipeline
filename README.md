@@ -1,13 +1,18 @@
 # IoT Flink Pipeline. Сделал Дмитрий Каневский
 
-Учебный проект по Apache Flink: Python-генератор создаёт IoT-события, Kafka хранит входной поток, Postgres хранит справочники производителей и сенсоров, а Flink читает эти данные, обогащает события справочником, считает оконные агрегаты по `event_time` и пишет результаты обратно в Kafka.
+Учебный проект по Apache Flink: Python-генератор создаёт IoT-события, Kafka хранит входной поток, Postgres хранит справочники производителей и сенсоров, а Flink читает данные, обогащает события справочником, считает оконные агрегаты по `event_time` и пишет результаты обратно в Kafka.
 
-Проект специально сделан не одним единственным способом, а несколькими Flink job, чтобы показать разные варианты работы с Flink:
+Проект специально содержит четыре варианта Flink job, чтобы показать разные режимы работы Flink на одной и той же задаче:
 
-- SQL/Table API для Kafka/Postgres sources, SQL join и Table sinks;
-- DataStream API для event-time оконной обработки;
-- переходы между Table API и DataStream API;
-- pure DataStream job со справочником производителей через broadcast state.
+- **Table-only job** — полностью решает задачу через SQL/Table API: Kafka source, Postgres source, SQL `JOIN`, SQL `TUMBLE` window и `upsert-kafka` sink. Этот вариант пишет changelog/update-сообщения, потому что streaming aggregation в Table API обновляет агрегат по мере прихода новых событий.
+
+- **Pure DataStream job** — полностью решает задачу через DataStream API: `KafkaSource`, broadcast state для справочника производителей, event-time window и обычный Kafka sink. Этот вариант пишет в Kafka только финальные результаты закрытых окон.
+
+- **Table → DataStream → Kafka job** — использует Table API для Kafka/Postgres sources и SQL join, затем переходит в DataStream API для оконной обработки. Этот вариант тоже пишет в Kafka только финальные результаты закрытых окон.
+
+- **Table → DataStream → Table job** — демонстрирует полный bridge между API: Table API sources/join, DataStream window, возврат обратно в Table API и запись через Table Kafka sink. Несмотря на возврат в Table API, результат уже сформирован DataStream-окном, поэтому в Kafka также пишутся только финальные результаты закрытых окон.
+
+Главное отличие: **Table-only job** показывает changelog/upsert-семантику Table API, а остальные три job используют DataStream event-time window и поэтому отправляют в Kafka уже готовые финальные агрегаты по закрытым окнам.
 
 Основной результат проекта: все четыре Flink job работают и пишут результаты в отдельные Kafka topics.
 
@@ -99,60 +104,321 @@ Python result consumer
 
 ---
 
-## 3. Что реализовано
+## 3. Быстрый старт
 
-### 3.1. Python IoT generator
+Проект можно запускать двумя способами:
 
-Генератор:
+- через `uv`;
+- через обычный Python `venv` + `pip`.
 
-- читает список сенсоров из Postgres;
-- генерирует события батчами;
-- пишет события в Kafka topic `iot_events`;
-- добавляет небольшой jitter к `event_time`, чтобы события могли быть слегка out-of-order по event time.
+Ниже оба варианта идут параллельно.
 
-Запуск через `uv`:
+### 3.1. Подготовить JAR-файлы Flink connectors
+
+Flink Kafka/JDBC connectors и PostgreSQL JDBC driver нужны PyFlink job'ам для работы с Kafka и Postgres.
+
+Скачать JAR-файлы:
 
 ```bash
-uv run run-generator --events-per-batch 20
+curl -L -o jars/flink-sql-connector-kafka-4.0.1-2.0.jar \
+  https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/4.0.1-2.0/flink-sql-connector-kafka-4.0.1-2.0.jar
+
+curl -L -o jars/flink-connector-jdbc-core-4.0.0-2.0.jar \
+  https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc-core/4.0.0-2.0/flink-connector-jdbc-core-4.0.0-2.0.jar
+
+curl -L -o jars/flink-connector-jdbc-postgres-4.0.0-2.0.jar \
+  https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc-postgres/4.0.0-2.0/flink-connector-jdbc-postgres-4.0.0-2.0.jar
+
+curl -L -o jars/postgresql-42.7.11.jar \
+  https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.11/postgresql-42.7.11.jar
 ```
 
-По умолчанию генератор работает бесконечно. Остановить можно через `Ctrl+C`.
+Проверить:
 
-### 3.2. Result consumer
+```bash
+ls -lh jars
+file jars/*.jar
+jar tf jars/flink-sql-connector-kafka-4.0.1-2.0.jar | head
+jar tf jars/postgresql-42.7.11.jar | head
+```
 
-Consumer слушает все result topics и печатает сообщения:
+JAR-файлы можно не коммитить в GitHub, но они должны лежать локально по путям из `.env`.
+
+### 3.2. Создать `.env`
+
+```bash
+cp .env.example .env
+```
+
+Пример `.env`:
+
+```env
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=iot_flink
+POSTGRES_USER=iot_user
+POSTGRES_PASSWORD=iot_password
+
+FLINK_PARALLELISM=1
+FLINK_CHECKPOINT_INTERVAL=10s
+
+WATERMARK_DELAY=10
+
+KAFKA_CONNECTOR_JAR=jars/flink-sql-connector-kafka-4.0.1-2.0.jar
+JDBC_CORE_JAR=jars/flink-connector-jdbc-core-4.0.0-2.0.jar
+JDBC_POSTGRES_JAR=jars/flink-connector-jdbc-postgres-4.0.0-2.0.jar
+POSTGRES_DRIVER_JAR=jars/postgresql-42.7.11.jar
+```
+
+`WATERMARK_DELAY=10` — общий параметр задержки watermark в секундах. Он используется и в DataStream API, и в Table API DDL.
+
+### 3.3. Установить зависимости
+
+Вариант через `uv`:
+
+```bash
+uv sync
+```
+
+Вариант через обычный Python:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+pip install -e .
+```
+
+Если при установке `apache-beam` появится ошибка про `pkg_resources`, повторить:
+
+```bash
+pip install --upgrade setuptools
+pip install -e .
+```
+
+### 3.4. Запустить инфраструктуру
+
+```bash
+docker compose up -d
+```
+
+Проверить контейнеры:
+
+```bash
+docker compose ps
+```
+
+Kafka UI:
+
+```text
+http://localhost:8080
+```
+
+Postgres:
+
+```text
+localhost:5432
+```
+
+Kafka bootstrap:
+
+```text
+localhost:9092
+```
+
+Остановить контейнеры без удаления данных:
+
+```bash
+docker compose stop
+```
+
+Полностью пересоздать инфраструктуру с удалением volumes:
+
+```bash
+docker compose down -v
+docker compose up -d
+```
+
+---
+
+## 4. Запуск: параллельный режим
+
+Обычно нужно открыть несколько терминалов.
+
+### Терминал 1: result consumer
+
+Consumer подписывается на все result topics и позволяет уведить в терминале, что все работает, без необходимости открытия Kafka UI в браузере или исполнения docker команд.
+
+Через `uv`:
 
 ```bash
 uv run run-result-consumer
 ```
 
-Он подписывается на:
+Через обычный Python после `source .venv/bin/activate`:
 
-```text
-iot_aggregates_upsert
-iot_window_results
-iot_window_results_table_sink
-iot_window_results_datastream
+```bash
+run-result-consumer
 ```
 
-В выводе видно, из какого topic пришло сообщение:
+Или через модуль:
+
+```bash
+python -m iot_flink_pipeline.entrypoints.run_result_consumer
+```
+
+### Терминал 2: generator
+
+По дефолту будет 10 событий в батче. Это число можно изменить с помощью параметра `--events-per-batch`.
+
+Через `uv`:
+
+```bash
+uv run run-generator --events-per-batch 20
+```
+
+Через обычный Python:
+
+```bash
+run-generator --events-per-batch 20
+```
+
+Или через модуль:
+
+```bash
+python -m iot_flink_pipeline.entrypoints.run_generator --events-per-batch 20
+```
+
+### Терминал 3: один из Flink jobs
+
+Основной hybrid job:
+
+```bash
+uv run run-flink-datastream-window-job
+# или без uv:
+run-flink-datastream-window-job
+# или:
+python -m iot_flink_pipeline.entrypoints.run_flink_datastream_window_job
+```
+
+Table-only upsert job:
+
+```bash
+uv run run-flink-table-upsert-job
+# или без uv:
+run-flink-table-upsert-job
+# или:
+python -m iot_flink_pipeline.entrypoints.run_flink_table_upsert_job
+```
+
+Bridge job:
+
+```bash
+uv run run-flink-bridge-table-sink-job
+# или без uv:
+run-flink-bridge-table-sink-job
+# или:
+python -m iot_flink_pipeline.entrypoints.run_flink_bridge_table_sink_job
+```
+
+Pure DataStream job:
+
+```bash
+uv run run-flink-pure-datastream-job
+# или без uv:
+run-flink-pure-datastream-job
+# или:
+python -m iot_flink_pipeline.entrypoints.run_flink_pure_datastream_job
+```
+
+Можно также использовать helper script:
+
+```bash
+./scripts/run.sh run-flink-datastream-window-job
+./scripts/run.sh run-flink-table-upsert-job
+./scripts/run.sh run-flink-bridge-table-sink-job
+./scripts/run.sh run-flink-pure-datastream-job
+```
+
+`run.sh` пишет лог job в файл вида:
 
 ```text
-[topic=iot_window_results partition=0 offset=12 topic_message_number=5] {...}
+run-flink-datastream-window-job_YYYYMMDD_HHMMSS.log
 ```
+
+Это не засоряет терминал в результать `Ctrl+C`. 
 
 ---
 
-## 4. Flink jobs
+## 5. Запуск: demo-режим по очереди
+
+Для демонстрации необязательно держать generator и все jobs параллельно. Удобный сценарий:
+
+1. Запустить infrastructure:
+
+```bash
+docker compose up -d
+```
+
+2. Запустить generator на 2–3 минуты:
+
+```bash
+uv run run-generator --events-per-batch 20
+# или без uv:
+run-generator --events-per-batch 20
+```
+
+3. Остановить generator через `Ctrl+C`.
+
+4. Запустить result consumer:
+
+```bash
+uv run run-result-consumer
+# или без uv:
+run-result-consumer
+```
+
+5. По очереди запускать Flink jobs:
+
+```bash
+uv run run-flink-datastream-window-job
+uv run run-flink-table-upsert-job
+uv run run-flink-bridge-table-sink-job
+uv run run-flink-pure-datastream-job
+```
+
+или без `uv`:
+
+```bash
+run-flink-datastream-window-job
+run-flink-table-upsert-job
+run-flink-bridge-table-sink-job
+run-flink-pure-datastream-job
+```
+
+Почему это работает:
+
+```text
+Flink jobs читают iot_events с earliest offset,
+поэтому они могут обработать события, которые уже лежат в Kafka.
+```
+
+Такой режим удобен для защиты: можно один раз накопить входные данные и показать, как разные jobs обрабатывают один и тот же набор событий.
+
+---
+
+## 6. Flink jobs
 
 В проекте четыре основных Flink job.
 
-### 4.1. Main hybrid job: Table join → DataStream window → Kafka
+### 6.1. Main hybrid job: Table join → DataStream window → Kafka
 
 Entrypoint:
 
 ```bash
-uv run run-flink-datastream-window-job
+run-flink-datastream-window-job
 ```
 
 Файл:
@@ -191,14 +457,12 @@ ordinary Kafka sink: iot_window_results
 
 Это основной вариант, наиболее близкий к формулировке задания.
 
----
-
-### 4.2. Table-only job: SQL window → upsert-kafka
+### 6.2. Table-only job: SQL window → upsert-kafka
 
 Entrypoint:
 
 ```bash
-uv run run-flink-table-upsert-job
+run-flink-table-upsert-job
 ```
 
 Файл:
@@ -235,14 +499,12 @@ window_start + window_end + manufacturer_id
 
 Ожидаемое поведение: в `iot_aggregates_upsert` может быть больше сообщений, чем во входном `iot_events`, потому что Table API пишет не только финальные значения окна, а changelog/update-сообщения.
 
----
-
-### 4.3. Bridge job: Table → DataStream window → Table sink
+### 6.3. Bridge job: Table → DataStream window → Table sink
 
 Entrypoint:
 
 ```bash
-uv run run-flink-bridge-table-sink-job
+run-flink-bridge-table-sink-job
 ```
 
 Файл:
@@ -279,16 +541,14 @@ Table API Kafka sink: iot_window_results_table_sink
 Table API → DataStream API → Table API
 ```
 
-Он более искусственный, чем основной job, но хорошо демонстрирует переход между API и Table API sink.
+Он более искусственный, чем основной job, но хорошо демонстрирует переход между Datastream API и Table API sink.
 
----
-
-### 4.4. Pure DataStream job: KafkaSource → broadcast state → window → Kafka
+### 6.4. Pure DataStream job: KafkaSource → broadcast state → window → Kafka
 
 Entrypoint:
 
 ```bash
-uv run run-flink-pure-datastream-job
+run-flink-pure-datastream-job
 ```
 
 Файл:
@@ -325,7 +585,7 @@ Kafka sink: iot_window_results_datastream
 
 ---
 
-## 5. Kafka topics
+## 7. Kafka topics
 
 | Topic | Назначение |
 |---|---|
@@ -338,11 +598,11 @@ Kafka sink: iot_window_results_datastream
 
 ---
 
-## 6. Event time, windows и watermarks
+## 8. Event time, windows и watermarks
 
 Проект использует **event time**, а не processing time.
 
-### 6.1. Размер окна
+### 8.1. Размер окна
 
 Основное окно:
 
@@ -372,7 +632,81 @@ avg_temperature
 median_humidity
 ```
 
-### 6.2. Watermark в DataStream API
+### 8.2. Jitter в генераторе
+
+Генератор добавляет небольшой случайный jitter к `event_time`:
+
+```text
+event_time = now + random jitter
+```
+
+Jitter ограничен примерно диапазоном:
+
+```text
+[-4 sec, +4 sec]
+```
+
+Идея: события могут приходить в Kafka в одном порядке, но иметь немного другой логический `event_time`. Это делает watermark-политику осмысленной.
+
+### 8.3. Почему watermark delay выбран 10 секунд
+
+Важный момент: если jitter равен `[-4 sec, +4 sec]`, то два события, сгенерированные почти одновременно, могут отличаться по `event_time` примерно на 8 секунд.
+
+Пример:
+
+```text
+processing/send time ≈ 01:03
+
+event A: event_time = 01:07
+event B: event_time = 00:59
+```
+
+Если event A с `event_time = 01:07` придёт во Flink раньше, то при watermark delay 5 секунд:
+
+```text
+max_seen_event_time = 01:07
+watermark = 01:07 - 5 sec = 01:02
+```
+
+Окно:
+
+```text
+00:00 - 01:00
+```
+
+уже закроется, потому что:
+
+```text
+watermark 01:02 >= window_end 01:00
+```
+
+Если после этого придёт event B с `event_time = 00:59`, он будет late event для уже закрытого окна.
+
+Поэтому watermark delay выбран с запасом:
+
+```text
+WATERMARK_DELAY=10
+```
+
+Логика такая:
+
+```text
+jitter range: [-4 sec, +4 sec]
+maximum event-time spread inside batch: about 8 sec
+watermark delay: 10 sec
+```
+
+Это уменьшает риск late events для нашей модели генерации.
+
+Компромисс:
+
+```text
+чем больше watermark delay,
+тем меньше late events,
+но тем позже Flink выпускает результат окна.
+```
+
+### 8.4. Watermark в DataStream API
 
 В DataStream-ветке `event_time` хранится как строка, затем переводится в epoch milliseconds:
 
@@ -384,14 +718,14 @@ event_time string -> event_ts_ms long
 
 ```python
 WatermarkStrategy \
-    .for_bounded_out_of_orderness(Duration.of_seconds(5)) \
+    .for_bounded_out_of_orderness(Duration.of_seconds(settings.watermark_delay)) \
     .with_timestamp_assigner(...)
 ```
 
 Смысл:
 
 ```text
-watermark = max_seen_event_time - 5 seconds
+watermark = max_seen_event_time - settings.watermark_delay seconds
 ```
 
 Окно закрывается, когда watermark прошёл конец окна:
@@ -400,7 +734,7 @@ watermark = max_seen_event_time - 5 seconds
 watermark >= window_end
 ```
 
-### 6.3. Watermark в Table API
+### 8.5. Watermark в Table API
 
 В Table API source для Kafka создаётся computed column:
 
@@ -411,38 +745,14 @@ event_ts AS TO_TIMESTAMP(...)
 и watermark:
 
 ```sql
-WATERMARK FOR event_ts AS event_ts - INTERVAL '5' SECOND
+WATERMARK FOR event_ts AS event_ts - INTERVAL {settings.watermark_delay} SECOND
 ```
 
 Это соответствует лекционному подходу: строковое время события превращается в timestamp, а затем для него объявляется watermark.
 
-### 6.4. Jitter в генераторе
-
-Генератор добавляет небольшой случайный jitter к `event_time`:
-
-```text
-event_time = now + random jitter
-```
-
-Идея: события могут приходить в Kafka в одном порядке, но иметь немного другой логический `event_time`. Это делает watermark-политику осмысленной.
-
-Jitter ограничен примерно диапазоном:
-
-```text
-[-4 sec, +4 sec]
-```
-
-А DataStream watermark допускает out-of-orderness:
-
-```text
-5 sec
-```
-
-То есть большинство слегка перемешанных событий всё ещё попадает в свои окна.
-
 ---
 
-## 7. Важный фикс для Table API watermarks
+## 9. Важный фикс для Table API watermarks
 
 Для Table-only job была обнаружена проблема: Kafka source читался, но SQL `TUMBLE` window не выпускал результат. Диагностика через `print` connector показала:
 
@@ -474,9 +784,41 @@ Flink считает её idle и не даёт ей блокировать об
 
 После этого Table-only job начал писать в `iot_aggregates_upsert`.
 
+### Примечание: почему Table API jobs могут дописать больше окон после паузы
+
+После добавления настройки:
+
+```python
+t_env.get_config().set("table.exec.source.idle-timeout", "10s")
+```
+
+Table API jobs начинают корректно продвигать watermark даже тогда, когда часть Kafka partitions больше не получает события.
+
+Это влияет на поведение после остановки generator:
+
+- **DataStream-only job** может продолжать ждать новые события, потому что последние окна закрываются только после продвижения watermark новыми событиями.
+- **Table API jobs** через `source.idle-timeout` через некоторое время считают неактивные Kafka partitions idle. После этого они могут продвинуть watermark и выпустить ещё часть оконных результатов.
+
+Поэтому при одинаковом входном topic `iot_events` количество сообщений в output topics может немного отличаться:
+
+```text
+iot_window_results_datastream     -> может выпустить меньше финальных окон, если generator уже остановлен
+iot_window_results                -> может выпустить больше окон после idle-timeout
+iot_window_results_table_sink     -> аналогично может дописать окна после idle-timeout
+```
+
+Это не ошибка. Это следствие разной политики продвижения watermark:
+
+```text
+DataStream window ждёт продвижения event-time watermark новыми событиями.
+Table API source с idle-timeout умеет перестать учитывать idle partitions и поэтому может закрыть окна после паузы.
+```
+
+В live-режиме, когда generator продолжает писать события, различия обычно менее заметны: новые события сами продвигают watermark, и окна постепенно закрываются во всех вариантах.
+
 ---
 
-## 8. Структура проекта
+## 10. Структура проекта
 
 Актуальная структура:
 
@@ -484,15 +826,8 @@ Flink считает её idle и не даёт ей блокировать об
 .
 ├── README.md
 ├── docker-compose.yml
-├── docs
-│   ├── flink_project_plan.md
-│   ├── flink_table_watermark_idle_timeout_fix.md
-│   └── flink_watermark_window_generator_notes.md
 ├── jars
-│   ├── flink-connector-jdbc-core-4.0.0-2.0.jar
-│   ├── flink-connector-jdbc-postgres-4.0.0-2.0.jar
-│   ├── flink-sql-connector-kafka-4.0.1-2.0.jar
-│   └── postgresql-42.7.11.jar
+│   ├── .gitkeep
 ├── pyproject.toml
 ├── scripts
 │   └── run.sh
@@ -537,7 +872,7 @@ Flink считает её idle и не даёт ей блокировать об
 
 ---
 
-## 9. Ответственность основных файлов
+## 11. Ответственность основных файлов
 
 ### `docker-compose.yml`
 
@@ -646,300 +981,7 @@ DataStream Kafka sink:
 
 ---
 
-## 10. Настройка окружения через uv
-
-### 10.1. Установка зависимостей
-
-```bash
-uv sync
-```
-
-### 10.2. `.env`
-
-Создать `.env` из `.env.example`:
-
-```bash
-cp .env.example .env
-```
-
-Пример `.env.example`:
-
-```env
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=iot_flink
-POSTGRES_USER=iot_user
-POSTGRES_PASSWORD=iot_password
-
-FLINK_PARALLELISM=1
-FLINK_CHECKPOINT_INTERVAL=10s
-
-KAFKA_CONNECTOR_JAR=jars/flink-sql-connector-kafka-4.0.1-2.0.jar
-JDBC_CORE_JAR=jars/flink-connector-jdbc-core-4.0.0-2.0.jar
-JDBC_POSTGRES_JAR=jars/flink-connector-jdbc-postgres-4.0.0-2.0.jar
-POSTGRES_DRIVER_JAR=jars/postgresql-42.7.11.jar
-```
-
-### 10.3. JAR-файлы
-
-JAR-файлы лежат в папке:
-
-```text
-jars/
-```
-
-Они не обязаны коммититься в репозиторий, но должны быть доступны локально по путям из `.env`.
-
----
-
-## 11. Запуск инфраструктуры
-
-```bash
-docker compose up -d
-```
-
-Kafka UI:
-
-```text
-http://localhost:8080
-```
-
-Postgres:
-
-```text
-localhost:5432
-```
-
-Kafka bootstrap:
-
-```text
-localhost:9092
-```
-
-Остановить контейнеры без удаления данных:
-
-```bash
-docker compose stop
-```
-
-Полностью пересоздать инфраструктуру с удалением volumes:
-
-```bash
-docker compose down -v
-docker compose up -d
-```
-
----
-
-## 12. Запуск через uv: параллельный режим
-
-Обычно нужно открыть несколько терминалов.
-
-### Терминал 1: result consumer
-
-```bash
-uv run run-result-consumer
-```
-
-### Терминал 2: generator
-
-```bash
-uv run run-generator --events-per-batch 20
-```
-
-### Терминал 3: один из Flink jobs
-
-Основной hybrid job:
-
-```bash
-uv run run-flink-datastream-window-job
-```
-
-Table-only upsert job:
-
-```bash
-uv run run-flink-table-upsert-job
-```
-
-Bridge job:
-
-```bash
-uv run run-flink-bridge-table-sink-job
-```
-
-Pure DataStream job:
-
-```bash
-uv run run-flink-pure-datastream-job
-```
-
-Можно также использовать helper script:
-
-```bash
-./scripts/run.sh run-flink-datastream-window-job
-./scripts/run.sh run-flink-table-upsert-job
-./scripts/run.sh run-flink-bridge-table-sink-job
-./scripts/run.sh run-flink-pure-datastream-job
-```
-
-`run.sh` пишет лог job в файл вида:
-
-```text
-run-flink-datastream-window-job_YYYYMMDD_HHMMSS.log
-```
-
----
-
-## 13. Запуск через uv: demo-режим по очереди
-
-Для демонстрации необязательно держать generator и все jobs параллельно. Удобный сценарий:
-
-1. Запустить infrastructure:
-
-```bash
-docker compose up -d
-```
-
-2. Запустить generator на 2–3 минуты:
-
-```bash
-uv run run-generator --events-per-batch 20
-```
-
-3. Остановить generator через `Ctrl+C`.
-
-4. Запустить result consumer:
-
-```bash
-uv run run-result-consumer
-```
-
-5. По очереди запускать Flink jobs:
-
-```bash
-uv run run-flink-datastream-window-job
-uv run run-flink-table-upsert-job
-uv run run-flink-bridge-table-sink-job
-uv run run-flink-pure-datastream-job
-```
-
-Почему это работает:
-
-```text
-Flink jobs читают iot_events с earliest offset,
-поэтому они могут обработать события, которые уже лежат в Kafka.
-```
-
-Такой режим удобен для защиты: можно один раз накопить входные данные и показать, как разные jobs обрабатывают один и тот же набор событий.
-
----
-
-## 14. Запуск без uv: обычный Python, venv и pip
-
-`uv` удобен, но не обязателен. Проект можно запустить через обычное виртуальное окружение Python.
-
-### 14.1. Создать виртуальное окружение
-
-Из корня проекта:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-```
-
-Проверить версию Python:
-
-```bash
-python --version
-```
-
-Ожидается Python 3.11.x.
-
-### 14.2. Обновить инструменты установки
-
-```bash
-python -m pip install --upgrade pip setuptools wheel
-```
-
-`setuptools` важен, потому что некоторые зависимости PyFlink / Beam могут ожидать `pkg_resources`.
-
-### 14.3. Установить проект и зависимости
-
-```bash
-pip install -e .
-```
-
-Если при установке `apache-beam` появится ошибка про `pkg_resources`, повторить:
-
-```bash
-pip install --upgrade setuptools
-pip install -e .
-```
-
-### 14.4. Подготовить `.env`
-
-```bash
-cp .env.example .env
-```
-
-В `.env` должны быть указаны пути к JAR-файлам Flink connectors. Пути должны быть абсолютными или корректными `file://` URI, например:
-
-```env
-KAFKA_CONNECTOR_JAR=file:///absolute/path/to/jars/flink-sql-connector-kafka-4.0.1-2.0.jar
-JDBC_CORE_JAR=file:///absolute/path/to/jars/flink-connector-jdbc-core-4.0.0-2.0.jar
-JDBC_POSTGRES_JAR=file:///absolute/path/to/jars/flink-connector-jdbc-postgres-4.0.0-2.0.jar
-POSTGRES_DRIVER_JAR=file:///absolute/path/to/jars/postgresql-42.7.11.jar
-```
-
-### 14.5. Запустить инфраструктуру
-
-```bash
-docker compose up -d
-```
-
-### 14.6. Запуск entrypoints без uv
-
-После `pip install -e .` console scripts из `pyproject.toml` доступны напрямую внутри активированного `.venv`.
-
-Генератор:
-
-```bash
-run-generator --events-per-batch 20
-```
-
-Consumer:
-
-```bash
-run-result-consumer
-```
-
-Flink jobs:
-
-```bash
-run-flink-datastream-window-job
-run-flink-table-upsert-job
-run-flink-bridge-table-sink-job
-run-flink-pure-datastream-job
-```
-
-### 14.7. Альтернативный запуск через `python -m`
-
-Если console scripts по какой-то причине недоступны:
-
-```bash
-python -m iot_flink_pipeline.entrypoints.run_generator --events-per-batch 20
-python -m iot_flink_pipeline.entrypoints.run_result_consumer
-python -m iot_flink_pipeline.entrypoints.run_flink_datastream_window_job
-python -m iot_flink_pipeline.entrypoints.run_flink_table_upsert_job
-python -m iot_flink_pipeline.entrypoints.run_flink_bridge_table_sink_job
-python -m iot_flink_pipeline.entrypoints.run_flink_pure_datastream_job
-```
-
----
-
-## 15. Рекомендуемый clean run
+## 12. Рекомендуемый clean run
 
 Для чистой проверки удобно пересоздать topics через Kafka UI или полностью пересоздать compose:
 
@@ -968,7 +1010,7 @@ run-result-consumer печатает JSON-сообщения
 
 ---
 
-## 16. Почему после перезапуска job могут появляться дубли
+## 13. Почему после перезапуска job могут появляться дубли
 
 Kafka source в Flink настроен на чтение с earliest offset:
 
@@ -984,7 +1026,7 @@ scan.startup.mode = earliest-offset
 
 ---
 
-## 17. Почему upsert topic может содержать больше сообщений, чем input topic
+## 14. Почему upsert topic может содержать больше сообщений, чем input topic
 
 `iot_aggregates_upsert` — это не обычный append-only topic с финальными результатами. Table-only streaming aggregation производит changelog/update stream.
 
@@ -1001,9 +1043,9 @@ events_count = 3
 
 ---
 
-## 18. Troubleshooting
+## 15. Troubleshooting
 
-### 18.1. Producer warning: Coordinator load in progress
+### 15.1. Producer warning: Coordinator load in progress
 
 Иногда при старте Kafka producer можно увидеть warning:
 
@@ -1020,7 +1062,7 @@ Produced batch: batch_size=5, total_produced=10
 
 значит всё нормально. Broker coordinator ещё догружался, producer повторил запрос и продолжил работу.
 
-### 18.2. Table API job читает Kafka, но не пишет оконные результаты
+### 15.2. Table API job читает Kafka, но не пишет оконные результаты
 
 Если `SELECT` из Kafka source работает, но `TUMBLE` window не выпускает результат, проверьте настройку:
 
@@ -1030,7 +1072,7 @@ t_env.get_config().set("table.exec.source.idle-timeout", "10s")
 
 Она нужна, чтобы idle Kafka partition не блокировала watermark.
 
-### 18.3. Output topic растёт при каждом перезапуске job
+### 15.3. Output topic растёт при каждом перезапуске job
 
 Это ожидаемо, потому что source читает с `earliest-offset`. Для чистого запуска очистите output topics или пересоздайте Docker volumes:
 
@@ -1041,7 +1083,7 @@ docker compose up -d
 
 ---
 
-## 19. Краткое объяснение проекта
+## 16. Краткое объяснение проекта
 
 ```text
 Я сделал учебный IoT streaming pipeline на Flink.
@@ -1060,7 +1102,7 @@ Python generator пишет события в Kafka. Postgres хранит сп�
 Про watermarks:
 
 ```text
-Мы используем event time. Генератор добавляет небольшой jitter к event_time, поэтому события могут приходить немного не по порядку. DataStream job использует watermark strategy с bounded out-of-orderness 5 секунд. Окно закрывается, когда watermark проходит конец минуты.
+Мы используем event time. Генератор добавляет jitter к event_time в диапазоне примерно [-4s, +4s]. Это значит, что два события из одного batch могут отличаться по event_time примерно на 8 секунд. Поэтому watermark delay вынесен в настройку WATERMARK_DELAY и выбран равным 10 секундам. Окно закрывается, когда watermark проходит конец минуты.
 ```
 
 Про Table API фикс:
@@ -1071,7 +1113,7 @@ Python generator пишет события в Kafka. Postgres хранит сп�
 
 ---
 
-## 20. Текущий статус
+## 17. Текущий статус
 
 Рабочие компоненты:
 

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     flink_parallelism: int = 1
     flink_checkpoint_interval: str = "10s"
+    watermark_delay: int = 10
 
     kafka_connector_jar: str
     jdbc_core_jar: str
